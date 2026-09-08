@@ -1,0 +1,2185 @@
+@page "/dashboard"
+@layout AuthLayout
+@rendermode InteractiveServer
+@inject UserSessionService UserSession
+@inject UserProfileService UserProfileService
+@inject ReferenceDataService ReferenceDataService
+@inject AdministrationService AdministrationService
+@inject OperationalSectionService OperationalSectionService
+@inject NavigationManager Navigation
+
+<PageTitle>Панель @(CurrentUser?.Role ?? string.Empty)</PageTitle>
+
+@if (CurrentUser is not null && profileModel is not null)
+{
+    <main class="dashboard-page">
+        <aside class="dashboard-sidebar" aria-label="Разделы модуля">
+            <h1>Разделы модуля</h1>
+            <nav class="dashboard-nav">
+                @foreach (var section in AvailableSections)
+                {
+                    <button class="dashboard-nav-item @(selectedSection == section && !isProfileOpen ? "active" : null)"
+                            type="button"
+                            @onclick="() => OpenSection(section)">
+                        @section
+                    </button>
+                }
+            </nav>
+        </aside>
+
+        <section class="dashboard-main">
+            <div class="dashboard-actions">
+                @if (!isProfileOpen)
+                {
+                    <div class="tool-panel" aria-label="Инструментарий">
+                        @foreach (var tool in toolButtons)
+                        {
+                            <button type="button" @onclick="() => HandleToolActionAsync(tool)">@tool</button>
+                        }
+                    </div>
+                }
+
+                <div class="account-actions" aria-label="Навигация пользователя">
+                    <button type="button" title="Домик" aria-label="Домик" @onclick="GoHome">
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M3 11.5 12 4l9 7.5"></path>
+                            <path d="M5 10.5V20h5v-5h4v5h5v-9.5"></path>
+                        </svg>
+                    </button>
+                    <button type="button" title="Личный кабинет" aria-label="Личный кабинет" @onclick="OpenProfile">
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M20 21a8 8 0 0 0-16 0"></path>
+                            <circle cx="12" cy="7" r="4"></circle>
+                        </svg>
+                    </button>
+                    <button type="button" title="Выход" aria-label="Выход" @onclick="Logout">
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M10 17l5-5-5-5"></path>
+                            <path d="M15 12H3"></path>
+                            <path d="M21 3v18"></path>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+
+            @if (isProfileOpen)
+            {
+                @RenderProfile()
+            }
+            else
+            {
+                <section class="workspace-panel">
+                    <div class="workspace-label">@WorkspaceTitle</div>
+
+                    @if (IsInitialWorkspace)
+                    {
+                        <div class="warehouse-schema">
+                            <img src="/img/schema_warehouse.png" alt="Схема склада" />
+                        </div>
+                    }
+                    else if (selectedSection == "Справочники")
+                    {
+                        @RenderReferenceWorkspace()
+                    }
+                    else if (selectedSection == "Администрирование")
+                    {
+                        @RenderAdministrationWorkspace()
+                    }
+                    else if (sectionActionButtons.TryGetValue(selectedSection, out var actions))
+                    {
+                        @RenderOperationalWorkspace(actions)
+                    }
+                    else
+                    {
+                        <div class="section-placeholder">
+                            <h2>@selectedSection</h2>
+                        </div>
+                    }
+                </section>
+            }
+        </section>
+    </main>
+}
+
+@code {
+    private static readonly string[] toolButtons =
+    [
+        "Сохранить",
+        "Изменить",
+        "Сохранить и выйти",
+        "Создать",
+        "Создать группу",
+        "Обновить"
+    ];
+
+    private static readonly Dictionary<string, string[]> roleSections = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["Администратор"] = ["Справочники", "Администрирование", "Склад", "Документы", "Движение агрегатов", "Мониторинг состояния", "Отчёты"],
+        ["Инженер"] = ["Справочники", "Документы", "Мониторинг состояния", "Отчёты"],
+        ["Менеджер по снабжению"] = ["Справочники", "Склад", "Документы", "Движение агрегатов", "Отчёты"],
+        ["Кладовщик"] = ["Справочники", "Документы", "Движение агрегатов"]
+    };
+
+    private const string WarehouseSection = "Схема склада";
+
+    private static readonly string[] referenceButtons =
+    [
+        "Воздушные суда",
+        "Агрегаты",
+        "Типы местонахождений",
+        "Единицы измерения",
+        "Поставщики",
+        "Изготовители",
+        "Роли"
+    ];
+
+    private static readonly string[] adminButtons =
+    [
+        "Список пользователей",
+        "Назначение ролей",
+        "Роли и права доступа",
+        "Структура склада",
+        "Справочники",
+        "Системная информация"
+    ];
+
+    private static readonly Dictionary<string, string[]> sectionActionButtons = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["Склад"] = ["Остатки агрегатов", "Местонахождение агрегатов", "Зоны хранения", "Ячейки хранения"],
+        ["Документы"] = ["Журнал документов", "Документы движения", "Заявки", "Приходные накладные", "Расходные накладные", "Акты"],
+        ["Движение агрегатов"] = ["История движений", "Приход", "Расход", "Внутренние перемещения", "Списания"],
+        ["Мониторинг состояния"] = ["Состояние агрегатов", "Контроль ресурсов", "Уведомления", "Контроль сроков"],
+        ["Отчёты"] = ["Стоимостная оценка складских запасов", "История движения агрегата", "Списания за период", "План закупки"]
+    };
+
+    private string selectedSection = WarehouseSection;
+    private bool isProfileOpen;
+    private bool isProfileEditing;
+    private bool isReferenceLoading;
+    private bool isAdminLoading;
+    private bool isOperationalLoading;
+    private bool isAdminReferenceEditing;
+    private bool isDocumentCreateOpen;
+    private bool isIncomingInvoiceCreateOpen;
+    private bool isRequestTypePickerOpen;
+    private bool isInternalMovementRequestCreateOpen;
+    private bool isRepairRequestCreateOpen;
+    private bool isRequestEditOpen;
+    private string? profileMessage;
+    private string? documentCreateMessage;
+    private string? incomingInvoiceMessage;
+    private string? requestMessage;
+    private string? selectedReference;
+    private string? selectedAdminAction;
+    private string? selectedOperationalAction;
+    private string? selectedAdminReferenceTable;
+    private string? searchText;
+    private string? selectedDocumentTypeId;
+    private string? selectedCreatorId;
+    private string? selectedMovementTypeId;
+    private string? selectedComponentInstanceId;
+    private string? selectedZoneId;
+    private string? selectedCellId;
+    private string? reportDateFrom;
+    private string? reportDateTo;
+    private string? selectedComponentTypeId;
+    private string? selectedPurchaseComponentId;
+    private int purchasePlanQuantity = 1;
+    private MUiKOA_WEB.Models.CreateDocumentModel createDocumentModel = new();
+    private MUiKOA_WEB.Models.IncomingInvoiceModel incomingInvoiceModel = new();
+    private MUiKOA_WEB.Models.InternalMovementRequestModel internalMovementRequestModel = new();
+    private MUiKOA_WEB.Models.RepairRequestModel repairRequestModel = new();
+    private MUiKOA_WEB.Models.GeneratedPurchasePlanDocument? generatedPurchasePlanDocument;
+    private MUiKOA_WEB.Models.GeneratedPurchasePlanDocument? generatedStockValueDocument;
+    private string? purchasePlanMessage;
+    private IReadOnlyDictionary<string, object?>? selectedDocumentCard;
+    private MUiKOA_WEB.Models.UserProfileEditModel? profileModel;
+    private MUiKOA_WEB.Models.AdminUserCardModel? selectedUserCard;
+    private MUiKOA_WEB.Models.EditableReferenceTable? editableReferenceTable;
+    private IReadOnlyList<MUiKOA_WEB.Models.ReferenceGroup> referenceGroups = [];
+    private IReadOnlyList<IReadOnlyDictionary<string, object?>> referenceRows = [];
+    private IReadOnlyList<MUiKOA_WEB.Models.AdminUserListItem> adminUsers = [];
+    private IReadOnlyList<MUiKOA_WEB.Models.RoleOption> roleOptions = [];
+    private IReadOnlyList<MUiKOA_WEB.Models.SelectOption> documentTypeOptions = [];
+    private IReadOnlyList<MUiKOA_WEB.Models.SelectOption> documentCreatorOptions = [];
+    private IReadOnlyList<MUiKOA_WEB.Models.SelectOption> movementTypeOptions = [];
+    private IReadOnlyList<MUiKOA_WEB.Models.SelectOption> componentOptions = [];
+    private IReadOnlyList<MUiKOA_WEB.Models.SelectOption> zoneOptions = [];
+    private IReadOnlyList<MUiKOA_WEB.Models.SelectOption> cellOptions = [];
+    private IReadOnlyList<MUiKOA_WEB.Models.SelectOption> componentTypeOptions = [];
+    private IReadOnlyList<MUiKOA_WEB.Models.SelectOption> purchaseComponentOptions = [];
+    private List<MUiKOA_WEB.Models.PurchasePlanItem> purchasePlanItems = [];
+    private IReadOnlyList<MUiKOA_WEB.Models.SelectOption> createDocumentTypeOptions = [];
+    private IReadOnlyList<MUiKOA_WEB.Models.SelectOption> createComponentOptions = [];
+    private IReadOnlyList<MUiKOA_WEB.Models.SelectOption> createComponentInstanceOptions = [];
+    private IReadOnlyList<MUiKOA_WEB.Models.SelectOption> createLocationOptions = [];
+    private IReadOnlyList<MUiKOA_WEB.Models.SelectOption> createUserOptions = [];
+    private IReadOnlyList<MUiKOA_WEB.Models.SelectOption> createMovementTypeOptions = [];
+    private IReadOnlyList<MUiKOA_WEB.Models.SelectOption> createSupplierOptions = [];
+    private IReadOnlyList<MUiKOA_WEB.Models.SelectOption> repairRequestComponentOptions = [];
+    private List<MUiKOA_WEB.Models.EditableRequestDocumentModel> editableRequestDocuments = [];
+    private IReadOnlyList<(string TableName, string DisplayName)> adminReferenceCatalog = [];
+    private IReadOnlyList<IReadOnlyDictionary<string, object?>> operationalRows = [];
+    private MUiKOA_WEB.Models.LocationDirectoryData? locationData;
+    private MUiKOA_WEB.Models.LocationDirectoryData? adminWarehouseData;
+
+    private MUiKOA_WEB.Models.AuthenticatedUser? CurrentUser => UserSession.Session;
+
+    private IReadOnlyList<string> AvailableSections =>
+        CurrentUser is not null && roleSections.TryGetValue(CurrentUser.Role, out var sections)
+            ? sections
+            : [];
+
+    private bool IsInitialWorkspace => selectedSection == WarehouseSection;
+
+    private string WorkspaceTitle => IsInitialWorkspace ? WarehouseSection : selectedSection;
+
+    private string DocumentActionColumnTitle => selectedSection == "Движение агрегатов" ? "Документ-основание" : "Карточка";
+
+    private string DocumentActionButtonText => selectedSection == "Движение агрегатов" ? "Открыть основание" : "Открыть";
+
+    protected override void OnInitialized()
+    {
+        var user = UserSession.InitializeFromHttpSession();
+
+        if (user is null)
+        {
+            Navigation.NavigateTo("/", forceLoad: true);
+            return;
+        }
+
+        profileModel = UserProfileService.ToEditModel(user);
+        adminReferenceCatalog = AdministrationService.GetEditableReferenceCatalog();
+    }
+
+    private void OpenSection(string section)
+    {
+        selectedSection = section;
+        isProfileOpen = false;
+        isProfileEditing = false;
+        profileMessage = null;
+        BackToReferenceMenu();
+        BackToAdminMenu();
+        BackToOperationalMenu();
+    }
+
+    private void OpenProfile()
+    {
+        isProfileOpen = true;
+        isProfileEditing = false;
+        profileMessage = null;
+
+        if (CurrentUser is not null)
+        {
+            profileModel = UserProfileService.ToEditModel(CurrentUser);
+        }
+    }
+
+    private RenderFragment RenderProfile() => @<section class="profile-panel">
+        <div class="workspace-label">Личный кабинет</div>
+
+        @if (!string.IsNullOrWhiteSpace(profileMessage))
+        {
+            <div class="profile-message">@profileMessage</div>
+        }
+
+        <div class="profile-toolbar">
+            @if (isProfileEditing)
+            {
+                <button type="button" @onclick="CancelProfileEditing">Отменить редактирование</button>
+                <button type="button" @onclick="SaveProfileAsync">Сохранить</button>
+                <button type="button" @onclick="SaveProfileAndExitAsync">Сохранить и выйти</button>
+            }
+            else
+            {
+                <button type="button" @onclick="StartProfileEditing">Редактировать</button>
+            }
+        </div>
+
+        <div class="profile-grid">
+            @RenderProfileInput("firstName", "Имя", profileModel!.FirstName, value => profileModel!.FirstName = value ?? string.Empty)
+            @RenderProfileInput("lastName", "Фамилия", profileModel!.LastName, value => profileModel!.LastName = value ?? string.Empty)
+            @RenderProfileInput("middleName", "Отчество", profileModel!.MiddleName, value => profileModel!.MiddleName = value ?? string.Empty)
+            <div class="profile-row"><label for="role">Роль</label><input id="role" value="@profileModel!.Role" disabled /></div>
+            @RenderProfileInput("birthDate", "Дата рождения", profileModel!.BirthDate, value => profileModel!.BirthDate = value, "date")
+            @RenderProfileInput("hireDate", "Дата трудоустройства", profileModel!.HireDate, value => profileModel!.HireDate = value, "date")
+            @RenderProfileInput("terminationDate", "Дата увольнения", profileModel!.TerminationDate, value => profileModel!.TerminationDate = value, "date")
+            @RenderProfileInput("phoneNumber", "Номер телефона", profileModel!.PhoneNumber, value => profileModel!.PhoneNumber = value ?? string.Empty)
+            @RenderProfileInput("email", "Эл. почта", profileModel!.Email, value => profileModel!.Email = value ?? string.Empty, "email")
+            @RenderProfileInput("password", "Пароль", profileModel!.Password, value => profileModel!.Password = value ?? string.Empty, "password")
+        </div>
+    </section>;
+
+    private RenderFragment RenderProfileInput(string id, string label, string? value, Action<string?> setter, string type = "text") => @<div class="profile-row">
+        <label for="@id">@label</label>
+        <input id="@id" type="@type" value="@value" @onchange="args => setter(Convert.ToString(args.Value))" disabled="@(!isProfileEditing)" />
+    </div>;
+
+    private void StartProfileEditing()
+    {
+        isProfileEditing = true;
+        profileMessage = null;
+    }
+
+    private void CancelProfileEditing()
+    {
+        isProfileEditing = false;
+        profileMessage = null;
+
+        if (CurrentUser is not null)
+        {
+            profileModel = UserProfileService.ToEditModel(CurrentUser);
+        }
+    }
+
+    private async Task SaveProfileAsync() => await SaveProfileCoreAsync(closeProfile: false);
+
+    private async Task SaveProfileAndExitAsync() => await SaveProfileCoreAsync(closeProfile: true);
+
+    private async Task SaveProfileCoreAsync(bool closeProfile)
+    {
+        if (profileModel is null)
+        {
+            return;
+        }
+
+        await UserProfileService.UpdateAsync(profileModel);
+        var updatedUser = await UserProfileService.GetByIdAsync(profileModel.Id);
+
+        if (updatedUser is null)
+        {
+            profileMessage = "Не удалось обновить данные пользователя.";
+            return;
+        }
+
+        UserSession.SetSession(updatedUser);
+        profileModel = UserProfileService.ToEditModel(updatedUser);
+        isProfileEditing = false;
+
+        if (closeProfile)
+        {
+            GoHome();
+        }
+        else
+        {
+            profileMessage = "Данные сохранены.";
+        }
+    }
+
+    private RenderFragment RenderReferenceWorkspace() => @<div class="reference-workspace">
+        @if (selectedReference is null)
+        {
+            <div class="reference-menu">
+                @foreach (var reference in referenceButtons)
+                {
+                    <button type="button" @onclick="() => OpenReferenceAsync(reference)">@reference</button>
+                }
+            </div>
+        }
+        else
+        {
+            <div class="reference-header">
+                <button type="button" @onclick="BackToReferenceMenu">Назад к списку справочников</button>
+            </div>
+            @RenderReferenceContent(locationData, referenceGroups, referenceRows, isReferenceLoading)
+        }
+    </div>;
+
+    private RenderFragment RenderAdministrationWorkspace() => @<div class="reference-workspace">
+        @if (selectedAdminAction is null)
+        {
+            <div class="reference-menu">
+                @foreach (var action in adminButtons)
+                {
+                    <button type="button" @onclick="() => OpenAdminActionAsync(action)">@action</button>
+                }
+            </div>
+        }
+        else
+        {
+            <div class="reference-header">
+                <button type="button" @onclick="BackToAdminMenu">Назад к разделу администрирования</button>
+            </div>
+
+            @if (isAdminLoading)
+            {
+                <div class="reference-empty">Загрузка данных...</div>
+            }
+            else if (selectedAdminAction == "Список пользователей")
+            {
+                @RenderUserList()
+            }
+            else if (selectedAdminAction == "Назначение ролей")
+            {
+                @RenderRoleAssignment()
+            }
+            else if (selectedAdminAction == "Роли и права доступа")
+            {
+                @RenderRoleAccess()
+            }
+            else if (selectedAdminAction == "Структура склада")
+            {
+                <div class="warehouse-schema admin-schema"><img src="/img/schema_warehouse.png" alt="Схема склада" /></div>
+                @RenderReferenceContent(adminWarehouseData, [], [], false)
+            }
+            else if (selectedAdminAction == "Справочники")
+            {
+                @RenderAdminReferences()
+            }
+            else if (selectedAdminAction == "Системная информация")
+            {
+                <div class="system-info">
+                    <div><span>Название</span><strong>МУиКОА</strong></div>
+                    <div><span>Версия</span><strong>1.0</strong></div>
+                    <div><span>Год выпуска</span><strong>2026</strong></div>
+                </div>
+            }
+        }
+    </div>;
+
+    private RenderFragment RenderOperationalWorkspace(string[] actions) => @<div class="reference-workspace">
+        @if (selectedOperationalAction is null)
+        {
+            <div class="reference-menu">
+                @foreach (var action in actions)
+                {
+                    <button type="button" @onclick="() => OpenOperationalActionAsync(action)">@action</button>
+                }
+            </div>
+        }
+        else
+        {
+            <div class="reference-header">
+                <button type="button" @onclick="BackToOperationalMenu">Назад к разделу</button>
+            </div>
+
+            @if (selectedOperationalAction == "План закупки")
+            {
+                @RenderPurchasePlanList()
+            }
+
+            @RenderOperationalFilters()
+
+            @if (isOperationalLoading)
+            {
+                <div class="reference-empty">Загрузка данных...</div>
+            }
+            else if (selectedOperationalAction == "План закупки")
+            {
+                @RenderPurchasePlanDocument()
+            }
+            else if (selectedOperationalAction is "Уведомления" or "Контроль сроков")
+            {
+                <div class="reference-empty">Раздел будет наполнен на следующем этапе.</div>
+            }
+            else
+            {
+                @if (HasDocumentCardColumn(operationalRows))
+                {
+                    @RenderDocumentRowsTable()
+                }
+                else
+                {
+                    @RenderReferenceTable(operationalRows)
+                }
+            }
+
+            @if (selectedOperationalAction == "Стоимостная оценка складских запасов")
+            {
+                @RenderStockValueDocument()
+            }
+
+            @if (selectedDocumentCard is not null)
+            {
+                <div class="modal-backdrop-panel">
+                    <div class="user-card-panel">
+                        <div class="profile-toolbar">
+                            <button type="button" @onclick="CloseDocumentCard">Закрыть</button>
+                        </div>
+                        @RenderDocumentCard(selectedDocumentCard)
+                    </div>
+                </div>
+            }
+
+            @if (isDocumentCreateOpen)
+            {
+                <div class="modal-backdrop-panel">
+                    <div class="user-card-panel document-create-panel">
+                        <div class="profile-toolbar">
+                            <button type="button" @onclick="SaveCreatedDocumentAsync">Сохранить документ</button>
+                            <button type="button" @onclick="CloseCreateDocumentForm">Закрыть</button>
+                        </div>
+
+                        @if (!string.IsNullOrWhiteSpace(documentCreateMessage))
+                        {
+                            <div class="profile-message">@documentCreateMessage</div>
+                        }
+
+                        @RenderCreateDocumentForm()
+                    </div>
+                </div>
+            }
+
+            @if (isIncomingInvoiceCreateOpen)
+            {
+                <div class="modal-backdrop-panel">
+                    <div class="user-card-panel document-create-panel">
+                        <div class="profile-toolbar">
+                            <button type="button" @onclick="SaveIncomingInvoiceAsync">Создать</button>
+                            <button type="button" @onclick="CloseIncomingInvoiceForm">Закрыть</button>
+                        </div>
+
+                        <div class="workspace-label">Приходная накладная</div>
+
+                        @if (!string.IsNullOrWhiteSpace(incomingInvoiceMessage))
+                        {
+                            <div class="profile-message">@incomingInvoiceMessage</div>
+                        }
+
+                        @RenderIncomingInvoiceForm()
+                    </div>
+                </div>
+            }
+
+            @if (isRequestTypePickerOpen)
+            {
+                <div class="modal-backdrop-panel">
+                    <div class="user-card-panel document-create-panel">
+                        <div class="profile-toolbar">
+                            <button type="button" @onclick="CloseRequestTypePicker">Закрыть</button>
+                        </div>
+
+                        <div class="workspace-label">Выбор типа заявки</div>
+
+                        @if (!string.IsNullOrWhiteSpace(requestMessage))
+                        {
+                            <div class="profile-message">@requestMessage</div>
+                        }
+
+                        <div class="reference-menu">
+                            <button type="button" @onclick="OpenInternalMovementRequestForm">Заявка на внутреннее перемещение</button>
+                            <button type="button" @onclick="OpenRepairRequestFormAsync">Заявка на ремонт агрегата</button>
+                        </div>
+                    </div>
+                </div>
+            }
+
+            @if (isRepairRequestCreateOpen)
+            {
+                <div class="modal-backdrop-panel">
+                    <div class="user-card-panel document-create-panel">
+                        <div class="profile-toolbar">
+                            <button type="button" @onclick="SaveRepairRequestAsync">Создать</button>
+                            <button type="button" @onclick="CloseRepairRequestForm">Закрыть</button>
+                        </div>
+
+                        <div class="workspace-label">Заявка на ремонт агрегата</div>
+
+                        @if (!string.IsNullOrWhiteSpace(requestMessage))
+                        {
+                            <div class="profile-message">@requestMessage</div>
+                        }
+
+                        @RenderRepairRequestForm()
+                    </div>
+                </div>
+            }
+
+            @if (isInternalMovementRequestCreateOpen)
+            {
+                <div class="modal-backdrop-panel">
+                    <div class="user-card-panel document-create-panel">
+                        <div class="profile-toolbar">
+                            <button type="button" @onclick="SaveInternalMovementRequestAsync">Создать</button>
+                            <button type="button" @onclick="CloseInternalMovementRequestForm">Закрыть</button>
+                        </div>
+
+                        <div class="workspace-label">Заявка на внутреннее перемещение</div>
+
+                        @if (!string.IsNullOrWhiteSpace(requestMessage))
+                        {
+                            <div class="profile-message">@requestMessage</div>
+                        }
+
+                        @RenderInternalMovementRequestForm()
+                    </div>
+                </div>
+            }
+
+            @if (isRequestEditOpen)
+            {
+                <div class="modal-backdrop-panel">
+                    <div class="user-card-panel document-create-panel">
+                        <div class="profile-toolbar">
+                            <button type="button" @onclick="SaveRequestDocumentsAsync">Сохранить</button>
+                            <button type="button" @onclick="CloseRequestEditForm">Закрыть</button>
+                        </div>
+
+                        <div class="workspace-label">Изменение заявок</div>
+
+                        @if (!string.IsNullOrWhiteSpace(requestMessage))
+                        {
+                            <div class="profile-message">@requestMessage</div>
+                        }
+
+                        @RenderRequestEditForm()
+                    </div>
+                </div>
+            }
+        }
+    </div>;
+
+    private RenderFragment RenderOperationalFilters() => @<div class="filter-panel">
+        @if (selectedOperationalAction is "Местонахождение агрегатов")
+        {
+            <input placeholder="Поиск по агрегату или серийному номеру" value="@searchText" @onchange="args => searchText = Convert.ToString(args.Value)" />
+            <select value="@selectedZoneId" @onchange="OnLocationZoneChangedAsync">
+                <option value="">Все зоны</option>
+                @foreach (var option in zoneOptions)
+                {
+                    <option value="@option.Value">@option.Text</option>
+                }
+            </select>
+            <select value="@selectedCellId" @onchange="args => selectedCellId = Convert.ToString(args.Value)">
+                <option value="">Все ячейки</option>
+                @foreach (var option in cellOptions)
+                {
+                    <option value="@option.Value">@option.Text</option>
+                }
+            </select>
+            <button type="button" @onclick="ReloadOperationalActionAsync">Найти</button>
+        }
+        else if (selectedOperationalAction is "Ячейки хранения")
+        {
+            <input placeholder="Поиск по серийному номеру или коду ячейки" value="@searchText" @onchange="args => searchText = Convert.ToString(args.Value)" />
+            <button type="button" @onclick="ReloadOperationalActionAsync">Найти</button>
+        }
+        else if (selectedOperationalAction is "Журнал документов")
+        {
+            <select value="@selectedDocumentTypeId" @onchange="args => selectedDocumentTypeId = Convert.ToString(args.Value)">
+                <option value="">Все типы документов</option>
+                @foreach (var option in documentTypeOptions)
+                {
+                    <option value="@option.Value">@option.Text</option>
+                }
+            </select>
+            <select value="@selectedCreatorId" @onchange="args => selectedCreatorId = Convert.ToString(args.Value)">
+                <option value="">Все создатели</option>
+                @foreach (var option in documentCreatorOptions)
+                {
+                    <option value="@option.Value">@option.Text</option>
+                }
+            </select>
+            <button type="button" @onclick="ReloadOperationalActionAsync">Применить</button>
+        }
+        else if (selectedOperationalAction is "Документы движения" or "История движений")
+        {
+            <select value="@selectedMovementTypeId" @onchange="args => selectedMovementTypeId = Convert.ToString(args.Value)">
+                <option value="">Все типы движения</option>
+                @foreach (var option in movementTypeOptions)
+                {
+                    <option value="@option.Value">@option.Text</option>
+                }
+            </select>
+            <input placeholder="Поиск по серийному номеру" value="@searchText" @onchange="args => searchText = Convert.ToString(args.Value)" />
+            <button type="button" @onclick="ReloadOperationalActionAsync">Применить</button>
+        }
+        else if (selectedOperationalAction is "Стоимостная оценка складских запасов")
+        {
+            <button type="button" @onclick="GenerateStockValueDocumentAsync">Сформировать DOCX</button>
+        }
+        else if (selectedOperationalAction is "История движения агрегата")
+        {
+            <select value="@selectedComponentInstanceId" @onchange="args => selectedComponentInstanceId = Convert.ToString(args.Value)">
+                <option value="">Все агрегаты</option>
+                @foreach (var option in componentOptions)
+                {
+                    <option value="@option.Value">@option.Text</option>
+                }
+            </select>
+            <button type="button" @onclick="ReloadOperationalActionAsync">Сформировать</button>
+        }
+        else if (selectedOperationalAction is "Списания за период")
+        {
+            <input type="date" value="@reportDateFrom" @onchange="args => reportDateFrom = Convert.ToString(args.Value)" />
+            <input type="date" value="@reportDateTo" @onchange="args => reportDateTo = Convert.ToString(args.Value)" />
+            <button type="button" @onclick="ReloadOperationalActionAsync">Сформировать</button>
+        }
+        else if (selectedOperationalAction is "План закупки")
+        {
+            <select value="@selectedComponentTypeId" @onchange="OnPurchaseComponentTypeChangedAsync">
+                <option value="">Выберите тип агрегата</option>
+                @foreach (var option in componentTypeOptions)
+                {
+                    <option value="@option.Value">@option.Text</option>
+                }
+            </select>
+            <select value="@selectedPurchaseComponentId" @onchange="args => selectedPurchaseComponentId = Convert.ToString(args.Value)">
+                <option value="">Выберите агрегат</option>
+                @foreach (var option in purchaseComponentOptions)
+                {
+                    <option value="@option.Value">@option.Text</option>
+                }
+            </select>
+            <input type="number" min="1" step="1" placeholder="Количество к закупке" value="@purchasePlanQuantity" @onchange="SetPurchasePlanQuantity" />
+            <button type="button" @onclick="AddPurchasePlanItemAsync">Добавить</button>
+            <button type="button" @onclick="GeneratePurchasePlanDocumentAsync">Сформировать</button>
+        }
+    </div>;
+
+    private RenderFragment RenderPurchasePlanList() => @<div class="purchase-plan-panel">
+        <div class="purchase-plan-header">
+            <strong>Планируемый список закупки</strong>
+            <span>Итого: @FormatMoney(purchasePlanItems.Sum(item => item.TotalPrice))</span>
+        </div>
+
+        @if (!string.IsNullOrWhiteSpace(purchasePlanMessage))
+        {
+            <div class="reference-empty">@purchasePlanMessage</div>
+        }
+
+        @if (purchasePlanItems.Count == 0)
+        {
+            <div class="reference-empty">Позиции для закупки пока не добавлены.</div>
+        }
+        else
+        {
+            <div class="reference-table-wrap purchase-plan-table-wrap">
+                <table class="reference-table">
+                    <thead>
+                        <tr>
+                            <th>Тип агрегата</th>
+                            <th>Агрегат</th>
+                            <th>Изготовитель</th>
+                            <th>Поставщик</th>
+                            <th>Цена за ед.</th>
+                            <th>Количество</th>
+                            <th>Стоимость</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var item in purchasePlanItems)
+                        {
+                            <tr>
+                                <td>@item.ComponentTypeName</td>
+                                <td>@item.ComponentName</td>
+                                <td>@item.ManufacturerName</td>
+                                <td>@item.SupplierNames</td>
+                                <td>@FormatMoney(item.UnitPurchasePrice)</td>
+                                <td>
+                                    <input type="number" min="1" value="@item.Quantity" @onchange="args => UpdatePurchasePlanItemQuantity(item.ComponentId, args.Value)" />
+                                </td>
+                                <td>@FormatMoney(item.TotalPrice)</td>
+                                <td><button class="table-action-button" type="button" @onclick="() => RemovePurchasePlanItem(item.ComponentId)">Удалить</button></td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </div>;
+
+    private RenderFragment RenderPurchasePlanDocument() => @<div>
+        @if (generatedPurchasePlanDocument is not null)
+        {
+            <div class="generated-document-card">
+                <div>
+                    <strong>@generatedPurchasePlanDocument.FileName</strong>
+                    <span>Суммарная стоимость: @FormatMoney(generatedPurchasePlanDocument.TotalPrice)</span>
+                </div>
+                <a class="download-document-link"
+                   download="@generatedPurchasePlanDocument.FileName"
+                   href="data:@generatedPurchasePlanDocument.ContentType;base64,@generatedPurchasePlanDocument.Base64Content">
+                    Скачать DOCX
+                </a>
+            </div>
+        }
+    </div>;
+
+    private RenderFragment RenderStockValueDocument() => @<div>
+        @if (generatedStockValueDocument is not null)
+        {
+            <div class="generated-document-card">
+                <div>
+                    <strong>@generatedStockValueDocument.FileName</strong>
+                    <span>Документ стоимостной оценки складских запасов</span>
+                </div>
+                <a class="download-document-link"
+                   download="@generatedStockValueDocument.FileName"
+                   href="data:@generatedStockValueDocument.ContentType;base64,@generatedStockValueDocument.Base64Content">
+                    Скачать DOCX
+                </a>
+            </div>
+        }
+    </div>;
+
+    private RenderFragment RenderDocumentCard(IReadOnlyDictionary<string, object?> document) => @<div class="profile-grid">
+        @foreach (var field in document)
+        {
+            <div class="profile-row">
+                <label>@field.Key</label>
+                <input value="@FormatReferenceValue(field.Value)" disabled />
+            </div>
+        }
+    </div>;
+
+    private RenderFragment RenderIncomingInvoiceForm() => @<div class="profile-grid document-form-grid">
+        <div class="profile-row">
+            <label>Номер документа</label>
+            <input value="@incomingInvoiceModel.DocumentNumber" @onchange="args => incomingInvoiceModel.DocumentNumber = Convert.ToString(args.Value) ?? string.Empty" />
+        </div>
+        <div class="profile-row">
+            <label>Дата создания документа</label>
+            <input type="datetime-local" value="@incomingInvoiceModel.DocumentCreatedAt" @onchange="args => incomingInvoiceModel.DocumentCreatedAt = Convert.ToString(args.Value) ?? string.Empty" />
+        </div>
+        <div class="profile-row">
+            <label>Поставщик</label>
+            <select value="@incomingInvoiceModel.SupplierId" @onchange="args => incomingInvoiceModel.SupplierId = Convert.ToString(args.Value) ?? string.Empty">
+                <option value="">Выберите поставщика</option>
+                @foreach (var option in createSupplierOptions)
+                {
+                    <option value="@option.Value">@option.Text</option>
+                }
+            </select>
+        </div>
+        <div class="profile-row">
+            <label>Агрегат</label>
+            <select value="@incomingInvoiceModel.ComponentId" @onchange="args => incomingInvoiceModel.ComponentId = Convert.ToString(args.Value) ?? string.Empty">
+                <option value="">Выберите агрегат</option>
+                @foreach (var option in createComponentOptions)
+                {
+                    <option value="@option.Value">@option.Text</option>
+                }
+            </select>
+        </div>
+        <div class="profile-row">
+            <label>Серийный номер</label>
+            <input value="@incomingInvoiceModel.ComponentSerialNumber" @onchange="args => incomingInvoiceModel.ComponentSerialNumber = Convert.ToString(args.Value) ?? string.Empty" />
+        </div>
+        <div class="profile-row">
+            <label>Количество</label>
+            <input type="number" min="1" value="@incomingInvoiceModel.Quantity" @onchange="SetIncomingInvoiceQuantity" />
+        </div>
+        <div class="profile-row">
+            <label>Место на складе</label>
+            <select value="@incomingInvoiceModel.CurrentLocationId" @onchange="args => incomingInvoiceModel.CurrentLocationId = Convert.ToString(args.Value) ?? string.Empty">
+                <option value="">Выберите место на складе</option>
+                @foreach (var option in createLocationOptions)
+                {
+                    <option value="@option.Value">@option.Text</option>
+                }
+            </select>
+        </div>
+    </div>;
+
+    private RenderFragment RenderRepairRequestForm() => @<div class="profile-grid document-form-grid">
+        <div class="profile-row">
+            <label>Номер документа</label>
+            <input value="@repairRequestModel.DocumentNumber" @onchange="args => repairRequestModel.DocumentNumber = Convert.ToString(args.Value) ?? string.Empty" />
+        </div>
+        <div class="profile-row">
+            <label>Дата создания документа</label>
+            <input type="datetime-local" value="@repairRequestModel.DocumentCreatedAt" @onchange="args => repairRequestModel.DocumentCreatedAt = Convert.ToString(args.Value) ?? string.Empty" />
+        </div>
+        <div class="profile-row">
+            <label>Причина заявки</label>
+            <input value="@repairRequestModel.RequestReason" @onchange="args => repairRequestModel.RequestReason = Convert.ToString(args.Value) ?? string.Empty" />
+        </div>
+        <div class="profile-row">
+            <label>Агрегат</label>
+            <select value="@repairRequestModel.ComponentInstanceId" @onchange="OnRepairRequestComponentChangedAsync">
+                <option value="">Выберите агрегат</option>
+                @foreach (var option in repairRequestComponentOptions)
+                {
+                    <option value="@option.Value">@option.Text</option>
+                }
+            </select>
+        </div>
+        <div class="profile-row">
+            <label>Серийный номер агрегата</label>
+            <input value="@repairRequestModel.SerialNumber" disabled />
+        </div>
+    </div>;
+
+    private RenderFragment RenderInternalMovementRequestForm() => @<div class="profile-grid document-form-grid">
+        <div class="profile-row">
+            <label>Номер документа</label>
+            <input value="@internalMovementRequestModel.DocumentNumber" @onchange="args => internalMovementRequestModel.DocumentNumber = Convert.ToString(args.Value) ?? string.Empty" />
+        </div>
+        <div class="profile-row">
+            <label>Дата создания документа</label>
+            <input type="datetime-local" value="@internalMovementRequestModel.DocumentCreatedAt" @onchange="args => internalMovementRequestModel.DocumentCreatedAt = Convert.ToString(args.Value) ?? string.Empty" />
+        </div>
+        <div class="profile-row">
+            <label>Агрегат</label>
+            <select value="@internalMovementRequestModel.ComponentInstanceId" @onchange="OnInternalMovementComponentChangedAsync">
+                <option value="">Выберите агрегат</option>
+                @foreach (var option in repairRequestComponentOptions)
+                {
+                    <option value="@option.Value">@option.Text</option>
+                }
+            </select>
+        </div>
+        <div class="profile-row">
+            <label>Серийный номер агрегата</label>
+            <input value="@internalMovementRequestModel.SerialNumber" disabled />
+        </div>
+        <div class="profile-row">
+            <label>Новое местоположение</label>
+            <select value="@internalMovementRequestModel.NewLocationId" @onchange="args => internalMovementRequestModel.NewLocationId = Convert.ToString(args.Value) ?? string.Empty">
+                <option value="">Выберите новое местоположение</option>
+                @foreach (var option in createLocationOptions)
+                {
+                    <option value="@option.Value">@option.Text</option>
+                }
+            </select>
+        </div>
+    </div>;
+
+    private RenderFragment RenderRequestEditForm() => @<div class="reference-table-wrap">
+        @if (editableRequestDocuments.Count == 0)
+        {
+            <div class="reference-empty">Заявки для редактирования не найдены.</div>
+        }
+        else
+        {
+            <table class="reference-table">
+                <thead>
+                    <tr>
+                        <th>Тип заявки</th>
+                        <th>Номер документа</th>
+                        <th>Агрегат</th>
+                        <th>Серийный номер</th>
+                        <th>Статус заявки</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var request in editableRequestDocuments)
+                    {
+                        <tr>
+                            <td>@request.DocumentTypeName</td>
+                            <td>
+                                <input value="@request.DocumentNumber"
+                                       disabled="@(!request.IsEditable)"
+                                       @onchange="args => request.DocumentNumber = Convert.ToString(args.Value) ?? string.Empty" />
+                            </td>
+                            <td>@request.ComponentName</td>
+                            <td>@request.SerialNumber</td>
+                            <td>
+                                <select value="@request.RequestStatus"
+                                        disabled="@(!request.IsEditable)"
+                                        @onchange="args => request.RequestStatus = Convert.ToString(args.Value) ?? string.Empty">
+                                    <option value="Открыта">Открыта</option>
+                                    <option value="Закрыта">Закрыта</option>
+                                    <option value="Отменена">Отменена</option>
+                                </select>
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        }
+    </div>;
+
+    private RenderFragment RenderCreateDocumentForm() => @<div class="profile-grid document-form-grid">
+        <div class="profile-row">
+            <label>Тип документа</label>
+            <select value="@createDocumentModel.DocumentTypeId" @onchange="args => createDocumentModel.DocumentTypeId = Convert.ToString(args.Value) ?? string.Empty">
+                <option value="">Выберите тип документа</option>
+                @foreach (var option in createDocumentTypeOptions)
+                {
+                    <option value="@option.Value">@option.Text</option>
+                }
+            </select>
+        </div>
+        <div class="profile-row">
+            <label>Номер документа</label>
+            <input value="@createDocumentModel.DocumentNumber" @onchange="args => createDocumentModel.DocumentNumber = Convert.ToString(args.Value) ?? string.Empty" />
+        </div>
+        <div class="profile-row">
+            <label>Дата создания</label>
+            <input type="datetime-local" value="@createDocumentModel.DocumentCreatedAt" @onchange="args => createDocumentModel.DocumentCreatedAt = Convert.ToString(args.Value) ?? string.Empty" />
+        </div>
+        <div class="profile-row">
+            <label>Ответственный</label>
+            <select value="@createDocumentModel.ResponsiblePersonId" @onchange="args => createDocumentModel.ResponsiblePersonId = Convert.ToString(args.Value) ?? string.Empty">
+                <option value="">Не выбран</option>
+                @foreach (var option in createUserOptions)
+                {
+                    <option value="@option.Value">@option.Text</option>
+                }
+            </select>
+        </div>
+        <div class="profile-row">
+            <label>Агрегат</label>
+            <select value="@createDocumentModel.ComponentId" @onchange="args => createDocumentModel.ComponentId = Convert.ToString(args.Value) ?? string.Empty">
+                <option value="">Не выбран</option>
+                @foreach (var option in createComponentOptions)
+                {
+                    <option value="@option.Value">@option.Text</option>
+                }
+            </select>
+        </div>
+        <div class="profile-row">
+            <label>Серийный номер агрегата</label>
+            <select value="@createDocumentModel.ComponentInstanceId" @onchange="args => createDocumentModel.ComponentInstanceId = Convert.ToString(args.Value) ?? string.Empty">
+                <option value="">Не выбран</option>
+                @foreach (var option in createComponentInstanceOptions)
+                {
+                    <option value="@option.Value">@option.Text</option>
+                }
+            </select>
+        </div>
+        <div class="profile-row">
+            <label>Тип движения</label>
+            <select value="@createDocumentModel.MovementTypeId" @onchange="args => createDocumentModel.MovementTypeId = Convert.ToString(args.Value) ?? string.Empty">
+                <option value="">Не выбран</option>
+                @foreach (var option in createMovementTypeOptions)
+                {
+                    <option value="@option.Value">@option.Text</option>
+                }
+            </select>
+        </div>
+        <div class="profile-row">
+            <label>Предыдущее местонахождение</label>
+            <select value="@createDocumentModel.PreviousLocationId" @onchange="args => createDocumentModel.PreviousLocationId = Convert.ToString(args.Value) ?? string.Empty">
+                <option value="">Не выбрано</option>
+                @foreach (var option in createLocationOptions)
+                {
+                    <option value="@option.Value">@option.Text</option>
+                }
+            </select>
+        </div>
+        <div class="profile-row">
+            <label>Новое местонахождение</label>
+            <select value="@createDocumentModel.CurrentLocationId" @onchange="args => createDocumentModel.CurrentLocationId = Convert.ToString(args.Value) ?? string.Empty">
+                <option value="">Не выбрано</option>
+                @foreach (var option in createLocationOptions)
+                {
+                    <option value="@option.Value">@option.Text</option>
+                }
+            </select>
+        </div>
+        <div class="profile-row">
+            <label>Количество</label>
+            <input type="number" min="1" value="@createDocumentModel.Quantity" @onchange="SetCreateDocumentQuantity" />
+        </div>
+        <div class="profile-row">
+            <label>Поставщик</label>
+            <select value="@createDocumentModel.SupplierId" @onchange="args => createDocumentModel.SupplierId = Convert.ToString(args.Value) ?? string.Empty">
+                <option value="">Не выбран</option>
+                @foreach (var option in createSupplierOptions)
+                {
+                    <option value="@option.Value">@option.Text</option>
+                }
+            </select>
+        </div>
+        <div class="profile-row">
+            <label>Назначенный исполнитель</label>
+            <select value="@createDocumentModel.AssignedExecutorId" @onchange="args => createDocumentModel.AssignedExecutorId = Convert.ToString(args.Value) ?? string.Empty">
+                <option value="">Не выбран</option>
+                @foreach (var option in createUserOptions)
+                {
+                    <option value="@option.Value">@option.Text</option>
+                }
+            </select>
+        </div>
+        <div class="profile-row">
+            <label>Причина списания</label>
+            <input value="@createDocumentModel.WriteOffReason" @onchange="args => createDocumentModel.WriteOffReason = Convert.ToString(args.Value) ?? string.Empty" />
+        </div>
+        <div class="profile-row">
+            <label>Причина заявки</label>
+            <input value="@createDocumentModel.RequestReason" @onchange="args => createDocumentModel.RequestReason = Convert.ToString(args.Value) ?? string.Empty" />
+        </div>
+        <div class="profile-row">
+            <label>Статус заявки</label>
+            <input value="@createDocumentModel.RequestStatus" @onchange="args => createDocumentModel.RequestStatus = Convert.ToString(args.Value) ?? string.Empty" />
+        </div>
+        <div class="profile-row">
+            <label>Дата изменения статуса</label>
+            <input type="datetime-local" value="@createDocumentModel.StatusRequestChangedAt" @onchange="args => createDocumentModel.StatusRequestChangedAt = Convert.ToString(args.Value) ?? string.Empty" />
+        </div>
+        <div class="profile-row">
+            <label>Наработка, ч</label>
+            <input type="number" value="@createDocumentModel.OperatingHours" @onchange="args => createDocumentModel.OperatingHours = ParseNullableInt(args.Value)" />
+        </div>
+        <div class="profile-row">
+            <label>Наработка после ремонта, ч</label>
+            <input type="number" value="@createDocumentModel.OverhaulHours" @onchange="args => createDocumentModel.OverhaulHours = ParseNullableInt(args.Value)" />
+        </div>
+        <div class="profile-row">
+            <label>Бортовой номер</label>
+            <input value="@createDocumentModel.TailNumber" @onchange="args => createDocumentModel.TailNumber = Convert.ToString(args.Value) ?? string.Empty" />
+        </div>
+        <div class="profile-row">
+            <label>Результат работ</label>
+            <input value="@createDocumentModel.WorkResult" @onchange="args => createDocumentModel.WorkResult = Convert.ToString(args.Value) ?? string.Empty" />
+        </div>
+        <div class="profile-row document-form-wide">
+            <label>Примечание</label>
+            <textarea value="@createDocumentModel.Notes" @onchange="args => createDocumentModel.Notes = Convert.ToString(args.Value) ?? string.Empty"></textarea>
+        </div>
+    </div>;
+
+    private RenderFragment RenderDocumentRowsTable() => @<div class="reference-table-wrap">
+        <table class="reference-table">
+            <thead>
+                <tr>
+                    @foreach (var column in GetVisibleColumns(operationalRows, "ID документа"))
+                    {
+                        <th>@column</th>
+                    }
+                    <th>@DocumentActionColumnTitle</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var row in operationalRows)
+                {
+                    <tr>
+                        @foreach (var column in GetVisibleColumns(operationalRows, "ID документа"))
+                        {
+                            row.TryGetValue(column, out var value);
+                            <td>@FormatReferenceValue(value)</td>
+                        }
+                        <td>
+                            @if (TryGetLong(row, "ID документа", out var documentId))
+                            {
+                                <button class="table-action-button" type="button" @onclick="() => OpenDocumentCardAsync(documentId)">@DocumentActionButtonText</button>
+                            }
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>;
+
+    private RenderFragment RenderUserList() => @<div>
+        @RenderUserTable(showOpenButton: true)
+
+        @if (selectedUserCard is not null)
+        {
+            <div class="modal-backdrop-panel">
+                <div class="user-card-panel">
+                    <div class="profile-toolbar">
+                        <button type="button" @onclick="SaveSelectedUserAsync">Сохранить</button>
+                        <button type="button" @onclick="CloseSelectedUser">Закрыть</button>
+                    </div>
+                    @RenderUserCardEditor(selectedUserCard)
+                </div>
+            </div>
+        }
+    </div>;
+
+    private RenderFragment RenderUserTable(bool showOpenButton) => @<div class="reference-table-wrap">
+        <table class="reference-table">
+            <thead>
+                <tr>
+                    <th>Имя</th>
+                    <th>Фамилия</th>
+                    <th>Роль</th>
+                    @if (showOpenButton)
+                    {
+                        <th>Карточка</th>
+                    }
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var user in adminUsers)
+                {
+                    <tr>
+                        <td>@user.FirstName</td>
+                        <td>@user.LastName</td>
+                        <td>@user.RoleName</td>
+                        @if (showOpenButton)
+                        {
+                            <td><button class="table-action-button" type="button" @onclick="() => OpenUserCardAsync(user.Id)">Открыть</button></td>
+                        }
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>;
+
+    private RenderFragment RenderUserCardEditor(MUiKOA_WEB.Models.AdminUserCardModel user) => @<div class="profile-grid">
+        @RenderTextEditor("Имя", user.FirstName, value => user.FirstName = value ?? string.Empty)
+        @RenderTextEditor("Фамилия", user.LastName, value => user.LastName = value ?? string.Empty)
+        @RenderTextEditor("Отчество", user.MiddleName, value => user.MiddleName = value ?? string.Empty)
+        <div class="profile-row">
+            <label>Роль</label>
+            <select value="@user.RoleId" @onchange="args => user.RoleId = Convert.ToInt64(args.Value)">
+                @foreach (var role in roleOptions)
+                {
+                    <option value="@role.Id">@role.Name</option>
+                }
+            </select>
+        </div>
+        @RenderTextEditor("Дата рождения", user.BirthDate, value => user.BirthDate = value, "date")
+        @RenderTextEditor("Дата трудоустройства", user.HireDate, value => user.HireDate = value, "date")
+        @RenderTextEditor("Дата увольнения", user.TerminationDate, value => user.TerminationDate = value, "date")
+        @RenderTextEditor("Номер телефона", user.PhoneNumber, value => user.PhoneNumber = value ?? string.Empty)
+        @RenderTextEditor("Эл. почта", user.Email, value => user.Email = value ?? string.Empty, "email")
+        @RenderTextEditor("Пароль", user.Password, value => user.Password = value ?? string.Empty, "password")
+    </div>;
+
+    private RenderFragment RenderTextEditor(string label, string? value, Action<string?> setter, string type = "text") => @<div class="profile-row">
+        <label>@label</label>
+        <input type="@type" value="@value" @onchange="args => setter(Convert.ToString(args.Value))" />
+    </div>;
+
+    private RenderFragment RenderRoleAssignment() => @<div class="reference-table-wrap">
+        <table class="reference-table">
+            <thead><tr><th>Сотрудник</th><th>Роль</th><th>Сохранение</th></tr></thead>
+            <tbody>
+                @foreach (var user in adminUsers)
+                {
+                    <tr>
+                        <td>@user.LastName @user.FirstName</td>
+                        <td>
+                            <select value="@user.RoleId" @onchange="args => user.RoleId = Convert.ToInt64(args.Value)">
+                                @foreach (var role in roleOptions)
+                                {
+                                    <option value="@role.Id">@role.Name</option>
+                                }
+                            </select>
+                        </td>
+                        <td><button class="table-action-button" type="button" @onclick="() => SaveUserRoleAsync(user)">Сохранить</button></td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>;
+
+    private RenderFragment RenderRoleAccess() => @<div class="reference-table-wrap">
+        <table class="reference-table">
+            <thead><tr><th>Роль</th><th>Доступные разделы</th></tr></thead>
+            <tbody>
+                @foreach (var role in AdministrationService.GetRoleAccessInfo())
+                {
+                    <tr>
+                        <td>@role.RoleName</td>
+                        <td>@(role.Sections.Count == 0 ? "Нет доступа" : string.Join(", ", role.Sections))</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>;
+
+    private RenderFragment RenderAdminReferences() => @<div class="admin-reference-layout">
+        <div class="reference-menu compact">
+            @foreach (var reference in adminReferenceCatalog)
+            {
+                <button type="button" @onclick="() => OpenAdminReferenceAsync(reference.TableName)">@reference.DisplayName</button>
+            }
+        </div>
+
+        @if (editableReferenceTable is not null)
+        {
+            <details class="reference-details" open>
+                <summary>@editableReferenceTable.DisplayName</summary>
+                @RenderEditableReferenceTable(editableReferenceTable)
+            </details>
+        }
+    </div>;
+
+    private RenderFragment RenderEditableReferenceTable(MUiKOA_WEB.Models.EditableReferenceTable table) => @<div class="reference-table-wrap">
+        <table class="reference-table editable-reference-table">
+            <thead>
+                <tr>
+                    @foreach (var column in table.Columns)
+                    {
+                        <th>@column.DisplayName</th>
+                    }
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var row in table.Rows)
+                {
+                    <tr>
+                        @foreach (var column in table.Columns)
+                        {
+                            <td>
+                                @if (column.LookupOptions.Count > 0)
+                                {
+                                    <select value="@GetEditableValue(row, column.Name)"
+                                            disabled="@(column.IsPrimaryKey || !isAdminReferenceEditing)"
+                                            @onchange="args => SetEditableValue(row, column.Name, Convert.ToString(args.Value))">
+                                        <option value=""></option>
+                                        @foreach (var option in column.LookupOptions)
+                                        {
+                                            <option value="@option.Value">@option.Text</option>
+                                        }
+                                    </select>
+                                }
+                                else
+                                {
+                                    <input value="@GetEditableValue(row, column.Name)"
+                                           disabled="@(column.IsPrimaryKey || !isAdminReferenceEditing)"
+                                           @onchange="args => SetEditableValue(row, column.Name, Convert.ToString(args.Value))" />
+                                }
+                            </td>
+                        }
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>;
+
+    private RenderFragment RenderReferenceContent(MUiKOA_WEB.Models.LocationDirectoryData? data, IReadOnlyList<MUiKOA_WEB.Models.ReferenceGroup> groups, IReadOnlyList<IReadOnlyDictionary<string, object?>> rows, bool isLoading) => @<div>
+        @if (isLoading)
+        {
+            <div class="reference-empty">Загрузка данных...</div>
+        }
+        else if (data is not null)
+        {
+            @foreach (var warehouse in data.Warehouses)
+            {
+                <details class="reference-details">
+                    <summary>@warehouse.Title</summary>
+                    @foreach (var zone in warehouse.Zones)
+                    {
+                        <details class="reference-details nested">
+                            <summary>@zone.Title</summary>
+                            @foreach (var cell in zone.Cells)
+                            {
+                                <details class="reference-details nested">
+                                    <summary>@cell.Title</summary>
+                                    @RenderReferenceTable(cell.LocationRows)
+                                </details>
+                            }
+                        </details>
+                    }
+                </details>
+            }
+
+            <details class="reference-details"><summary>Воздушные суда</summary>@RenderReferenceTable(data.AircraftLocations)</details>
+            <details class="reference-details"><summary>Прочие местонахождения</summary>@RenderReferenceTable(data.OtherLocations)</details>
+        }
+        else if (groups.Count > 0)
+        {
+            @foreach (var group in groups)
+            {
+                <details class="reference-details">
+                    <summary>@group.Title</summary>
+                    @RenderReferenceTable(group.Rows)
+                </details>
+            }
+        }
+        else
+        {
+            @RenderReferenceTable(rows)
+        }
+    </div>;
+
+    private RenderFragment RenderReferenceTable(IReadOnlyList<IReadOnlyDictionary<string, object?>> rows) => builder =>
+    {
+        if (rows.Count == 0)
+        {
+            builder.OpenElement(0, "div");
+            builder.AddAttribute(1, "class", "reference-empty");
+            builder.AddContent(2, "Записи отсутствуют.");
+            builder.CloseElement();
+            return;
+        }
+
+        var columns = rows.SelectMany(row => row.Keys).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var sequence = 3;
+        builder.OpenElement(sequence++, "div");
+        builder.AddAttribute(sequence++, "class", "reference-table-wrap");
+        builder.OpenElement(sequence++, "table");
+        builder.AddAttribute(sequence++, "class", "reference-table");
+        builder.OpenElement(sequence++, "thead");
+        builder.OpenElement(sequence++, "tr");
+
+        foreach (var column in columns)
+        {
+            builder.OpenElement(sequence++, "th");
+            builder.AddContent(sequence++, column);
+            builder.CloseElement();
+        }
+
+        builder.CloseElement();
+        builder.CloseElement();
+        builder.OpenElement(sequence++, "tbody");
+
+        foreach (var row in rows)
+        {
+            builder.OpenElement(sequence++, "tr");
+            if (IsStockTotalRow(row))
+            {
+                builder.AddAttribute(sequence++, "class", "stock-total-row");
+            }
+
+            foreach (var column in columns)
+            {
+                row.TryGetValue(column, out var value);
+                builder.OpenElement(sequence++, "td");
+                builder.AddContent(sequence++, FormatReferenceValue(value));
+                builder.CloseElement();
+            }
+
+            builder.CloseElement();
+        }
+
+        builder.CloseElement();
+        builder.CloseElement();
+        builder.CloseElement();
+    };
+
+    private async Task OpenReferenceAsync(string reference)
+    {
+        selectedReference = reference;
+        isReferenceLoading = true;
+        referenceGroups = [];
+        referenceRows = [];
+        locationData = null;
+
+        try
+        {
+            switch (reference)
+            {
+                case "Воздушные суда":
+                    referenceGroups = await ReferenceDataService.GetAircraftAsync();
+                    break;
+                case "Агрегаты":
+                    referenceGroups = await ReferenceDataService.GetComponentsAsync();
+                    break;
+                case "Типы местонахождений":
+                    locationData = await ReferenceDataService.GetLocationTypesAsync();
+                    break;
+                case "Единицы измерения":
+                    referenceRows = await ReferenceDataService.GetUnitsAsync();
+                    break;
+                case "Поставщики":
+                    referenceGroups = await ReferenceDataService.GetSuppliersAsync();
+                    break;
+                case "Изготовители":
+                    referenceRows = await ReferenceDataService.GetManufacturersAsync();
+                    break;
+                case "Роли":
+                    referenceRows = await ReferenceDataService.GetRolesAsync();
+                    break;
+            }
+        }
+        finally
+        {
+            isReferenceLoading = false;
+        }
+    }
+
+    private async Task OpenAdminActionAsync(string action)
+    {
+        selectedAdminAction = action;
+        isAdminLoading = true;
+        selectedUserCard = null;
+        editableReferenceTable = null;
+        selectedAdminReferenceTable = null;
+        adminWarehouseData = null;
+
+        try
+        {
+            if (action is "Список пользователей" or "Назначение ролей")
+            {
+                adminUsers = await AdministrationService.GetUsersAsync();
+                roleOptions = await AdministrationService.GetRolesAsync();
+            }
+            else if (action == "Структура склада")
+            {
+                adminWarehouseData = await ReferenceDataService.GetLocationTypesAsync();
+            }
+        }
+        finally
+        {
+            isAdminLoading = false;
+        }
+    }
+
+    private async Task OpenUserCardAsync(long userId)
+    {
+        roleOptions = await AdministrationService.GetRolesAsync();
+        selectedUserCard = await AdministrationService.GetUserCardAsync(userId);
+    }
+
+    private async Task SaveSelectedUserAsync()
+    {
+        if (selectedUserCard is null)
+        {
+            return;
+        }
+
+        await AdministrationService.SaveUserCardAsync(selectedUserCard);
+        adminUsers = await AdministrationService.GetUsersAsync();
+        selectedUserCard = await AdministrationService.GetUserCardAsync(selectedUserCard.Id);
+    }
+
+    private void CloseSelectedUser()
+    {
+        selectedUserCard = null;
+    }
+
+    private async Task SaveUserRoleAsync(MUiKOA_WEB.Models.AdminUserListItem user)
+    {
+        await AdministrationService.UpdateUserRoleAsync(user.Id, user.RoleId);
+        adminUsers = await AdministrationService.GetUsersAsync();
+    }
+
+    private async Task OpenAdminReferenceAsync(string tableName)
+    {
+        selectedAdminReferenceTable = tableName;
+        editableReferenceTable = await AdministrationService.GetEditableReferenceAsync(tableName);
+        isAdminReferenceEditing = false;
+    }
+
+    private async Task OpenOperationalActionAsync(string action)
+    {
+        selectedOperationalAction = action;
+        searchText = null;
+        selectedDocumentTypeId = null;
+        selectedCreatorId = null;
+        selectedMovementTypeId = null;
+        selectedComponentInstanceId = null;
+        selectedZoneId = null;
+        selectedCellId = null;
+        selectedComponentTypeId = null;
+        selectedPurchaseComponentId = null;
+        purchasePlanQuantity = 1;
+        generatedPurchasePlanDocument = null;
+        generatedStockValueDocument = null;
+        purchasePlanMessage = null;
+        selectedDocumentCard = null;
+
+        if (action == "Местонахождение агрегатов")
+        {
+            zoneOptions = await OperationalSectionService.GetZonesAsync();
+            cellOptions = await OperationalSectionService.GetCellsAsync(null);
+        }
+        else if (action == "Журнал документов")
+        {
+            documentTypeOptions = await OperationalSectionService.GetDocumentTypesAsync();
+            documentCreatorOptions = await OperationalSectionService.GetDocumentCreatorsAsync();
+        }
+        else if (action is "Документы движения" or "История движений")
+        {
+            movementTypeOptions = await OperationalSectionService.GetMovementTypesAsync();
+        }
+        else if (action == "История движения агрегата")
+        {
+            componentOptions = await OperationalSectionService.GetComponentOptionsAsync();
+        }
+        else if (action == "План закупки")
+        {
+            componentTypeOptions = await OperationalSectionService.GetComponentTypesAsync();
+            purchaseComponentOptions = [];
+            operationalRows = [];
+        }
+
+        await ReloadOperationalActionAsync();
+    }
+
+    private async Task OnLocationZoneChangedAsync(ChangeEventArgs args)
+    {
+        selectedZoneId = Convert.ToString(args.Value);
+        selectedCellId = null;
+        cellOptions = await OperationalSectionService.GetCellsAsync(selectedZoneId);
+    }
+
+    private async Task OnPurchaseComponentTypeChangedAsync(ChangeEventArgs args)
+    {
+        selectedComponentTypeId = Convert.ToString(args.Value);
+        selectedPurchaseComponentId = null;
+        purchaseComponentOptions = string.IsNullOrWhiteSpace(selectedComponentTypeId)
+            ? []
+            : await OperationalSectionService.GetPurchaseComponentOptionsAsync(selectedComponentTypeId);
+    }
+
+    private void SetPurchasePlanQuantity(ChangeEventArgs args)
+    {
+        purchasePlanQuantity = int.TryParse(Convert.ToString(args.Value), out var quantity) && quantity > 0
+            ? quantity
+            : 1;
+    }
+
+    private async Task AddPurchasePlanItemAsync()
+    {
+        purchasePlanMessage = null;
+        generatedPurchasePlanDocument = null;
+
+        if (string.IsNullOrWhiteSpace(selectedComponentTypeId) || string.IsNullOrWhiteSpace(selectedPurchaseComponentId))
+        {
+            purchasePlanMessage = "Выберите тип агрегата и агрегат.";
+            return;
+        }
+
+        var item = await OperationalSectionService.GetPurchasePlanItemAsync(selectedPurchaseComponentId, purchasePlanQuantity);
+
+        if (item is null)
+        {
+            purchasePlanMessage = "Не удалось найти выбранный агрегат.";
+            return;
+        }
+
+        var existingItem = purchasePlanItems.FirstOrDefault(planItem => planItem.ComponentId == item.ComponentId);
+
+        if (existingItem is not null)
+        {
+            existingItem.Quantity += item.Quantity;
+        }
+        else
+        {
+            purchasePlanItems.Add(item);
+        }
+
+        purchasePlanQuantity = 1;
+        selectedPurchaseComponentId = null;
+    }
+
+    private void UpdatePurchasePlanItemQuantity(long componentId, object? value)
+    {
+        var item = purchasePlanItems.FirstOrDefault(planItem => planItem.ComponentId == componentId);
+
+        if (item is null)
+        {
+            return;
+        }
+
+        item.Quantity = int.TryParse(Convert.ToString(value), out var quantity) && quantity > 0
+            ? quantity
+            : 1;
+        generatedPurchasePlanDocument = null;
+    }
+
+    private void RemovePurchasePlanItem(long componentId)
+    {
+        purchasePlanItems.RemoveAll(item => item.ComponentId == componentId);
+        generatedPurchasePlanDocument = null;
+    }
+
+    private Task GeneratePurchasePlanDocumentAsync()
+    {
+        purchasePlanMessage = null;
+
+        if (purchasePlanItems.Count == 0)
+        {
+            purchasePlanMessage = "Добавьте хотя бы один агрегат в план закупки.";
+            generatedPurchasePlanDocument = null;
+            return Task.CompletedTask;
+        }
+
+        generatedPurchasePlanDocument = OperationalSectionService.GeneratePurchasePlanDocument(purchasePlanItems);
+        return Task.CompletedTask;
+    }
+
+    private async Task GenerateStockValueDocumentAsync()
+    {
+        generatedStockValueDocument = await OperationalSectionService.GenerateStockValueReportDocumentAsync();
+    }
+
+    private async Task ReloadOperationalActionAsync()
+    {
+        if (selectedOperationalAction is null)
+        {
+            return;
+        }
+
+        isOperationalLoading = true;
+        selectedDocumentCard = null;
+
+        try
+        {
+            operationalRows = selectedOperationalAction switch
+            {
+                "Остатки агрегатов" => await OperationalSectionService.GetStockBalancesAsync(),
+                "Местонахождение агрегатов" => await OperationalSectionService.GetComponentLocationsAsync(searchText, selectedZoneId, selectedCellId),
+                "Зоны хранения" => await OperationalSectionService.GetStorageZonesAsync(),
+                "Ячейки хранения" => await OperationalSectionService.GetStorageCellsAsync(searchText),
+                "Журнал документов" => await OperationalSectionService.GetDocumentJournalAsync(selectedDocumentTypeId, selectedCreatorId),
+                "Документы движения" => await OperationalSectionService.GetMovementDocumentsAsync(selectedMovementTypeId, searchText),
+                "Заявки" => await OperationalSectionService.GetDocumentsByTypeNamesAsync(["Заявка на внутренне перемещение агрегата", "Заявка на ремонт агрегата", "Заявка на ТО ВС"]),
+                "Приходные накладные" => await OperationalSectionService.GetDocumentsByTypeNamesAsync(["Приходная накладная"]),
+                "Расходные накладные" => await OperationalSectionService.GetDocumentsByTypeNamesAsync(["Расходная накладная"]),
+                "Акты" => await OperationalSectionService.GetDocumentsByTypeNamesAsync(["Акт возврата агрегата с ВС", "Акт выполненного ремонта", "Акт списания агрегата", "Акт установки агрегата на ВС"]),
+                "История движений" => await OperationalSectionService.GetMovementDocumentsAsync(selectedMovementTypeId, searchText),
+                "Приход" => await OperationalSectionService.GetDocumentsByMovementTypeAsync("Приход"),
+                "Расход" => await OperationalSectionService.GetDocumentsByMovementTypeAsync("Расход"),
+                "Внутренние перемещения" => await OperationalSectionService.GetDocumentsByMovementTypeAsync("Внутреннее перемещение"),
+                "Списания" => await OperationalSectionService.GetWriteOffDocumentsAsync(),
+                "Состояние агрегатов" => await OperationalSectionService.GetComponentConditionAsync(),
+                "Контроль ресурсов" => await OperationalSectionService.GetResourceControlAsync(),
+                "Стоимостная оценка складских запасов" => (await OperationalSectionService.GetStockValueReportAsync()).Rows,
+                "История движения агрегата" => await OperationalSectionService.GetComponentMovementHistoryReportAsync(selectedComponentInstanceId),
+                "Списания за период" => await OperationalSectionService.GetWriteOffsByPeriodAsync(reportDateFrom, reportDateTo),
+                "План закупки" => [],
+                _ => []
+            };
+        }
+        finally
+        {
+            isOperationalLoading = false;
+        }
+    }
+
+    private async Task OpenDocumentCardAsync(long documentId)
+    {
+        selectedDocumentCard = await OperationalSectionService.GetDocumentCardAsync(documentId);
+    }
+
+    private void CloseDocumentCard()
+    {
+        selectedDocumentCard = null;
+    }
+
+    private async Task HandleToolActionAsync(string tool)
+    {
+        if (selectedSection == "Документы" && tool == "Создать")
+        {
+            if (selectedOperationalAction == "Приходные накладные")
+            {
+                await OpenIncomingInvoiceFormAsync();
+            }
+            else if (selectedOperationalAction == "Заявки")
+            {
+                OpenRequestTypePicker();
+            }
+            else
+            {
+                await OpenCreateDocumentFormAsync();
+            }
+
+            return;
+        }
+
+        if (selectedSection == "Документы" && selectedOperationalAction == "Заявки" && tool == "Изменить")
+        {
+            await OpenRequestEditFormAsync();
+            return;
+        }
+
+        if (selectedSection != "Администрирование" || selectedAdminAction != "Справочники" || editableReferenceTable is null)
+        {
+            return;
+        }
+
+        switch (tool)
+        {
+            case "Изменить":
+                isAdminReferenceEditing = true;
+                break;
+            case "Создать":
+                AddEditableReferenceRow();
+                isAdminReferenceEditing = true;
+                break;
+            case "Сохранить":
+                await AdministrationService.SaveEditableReferenceAsync(editableReferenceTable);
+                editableReferenceTable = await AdministrationService.GetEditableReferenceAsync(editableReferenceTable.TableName);
+                isAdminReferenceEditing = false;
+                break;
+            case "Обновить":
+                editableReferenceTable = await AdministrationService.GetEditableReferenceAsync(editableReferenceTable.TableName);
+                isAdminReferenceEditing = false;
+                break;
+        }
+    }
+
+    private async Task OpenCreateDocumentFormAsync()
+    {
+        createDocumentModel = new MUiKOA_WEB.Models.CreateDocumentModel();
+        documentCreateMessage = null;
+        isDocumentCreateOpen = true;
+
+        createDocumentTypeOptions = await OperationalSectionService.GetDocumentTypesAsync();
+        createComponentOptions = await OperationalSectionService.GetDocumentComponentOptionsAsync();
+        createComponentInstanceOptions = await OperationalSectionService.GetDocumentComponentInstanceOptionsAsync();
+        createMovementTypeOptions = await OperationalSectionService.GetMovementTypesAsync();
+        createLocationOptions = await OperationalSectionService.GetLocationOptionsAsync();
+        createUserOptions = await OperationalSectionService.GetUserOptionsAsync();
+        createSupplierOptions = await OperationalSectionService.GetSupplierOptionsAsync();
+    }
+
+    private void CloseCreateDocumentForm()
+    {
+        isDocumentCreateOpen = false;
+        documentCreateMessage = null;
+    }
+
+    private async Task OpenIncomingInvoiceFormAsync()
+    {
+        incomingInvoiceModel = new MUiKOA_WEB.Models.IncomingInvoiceModel();
+        incomingInvoiceMessage = null;
+        isIncomingInvoiceCreateOpen = true;
+
+        createSupplierOptions = await OperationalSectionService.GetSupplierOptionsAsync();
+        createComponentOptions = await OperationalSectionService.GetDocumentComponentOptionsAsync();
+        createLocationOptions = await OperationalSectionService.GetLocationOptionsAsync();
+    }
+
+    private void CloseIncomingInvoiceForm()
+    {
+        isIncomingInvoiceCreateOpen = false;
+        incomingInvoiceMessage = null;
+    }
+
+    private void OpenRequestTypePicker()
+    {
+        requestMessage = null;
+        isRequestTypePickerOpen = true;
+        isInternalMovementRequestCreateOpen = false;
+        isRepairRequestCreateOpen = false;
+        isRequestEditOpen = false;
+    }
+
+    private void CloseRequestTypePicker()
+    {
+        isRequestTypePickerOpen = false;
+        requestMessage = null;
+    }
+
+    private async Task OpenInternalMovementRequestForm()
+    {
+        internalMovementRequestModel = new MUiKOA_WEB.Models.InternalMovementRequestModel();
+        requestMessage = null;
+        repairRequestComponentOptions = await OperationalSectionService.GetDocumentComponentInstanceOptionsAsync();
+        createLocationOptions = await OperationalSectionService.GetLocationOptionsAsync();
+        isRequestTypePickerOpen = false;
+        isInternalMovementRequestCreateOpen = true;
+    }
+
+    private void CloseInternalMovementRequestForm()
+    {
+        isInternalMovementRequestCreateOpen = false;
+        requestMessage = null;
+    }
+
+    private async Task OpenRepairRequestFormAsync()
+    {
+        repairRequestModel = new MUiKOA_WEB.Models.RepairRequestModel();
+        requestMessage = null;
+        repairRequestComponentOptions = await OperationalSectionService.GetDocumentComponentInstanceOptionsAsync();
+        isRequestTypePickerOpen = false;
+        isRepairRequestCreateOpen = true;
+    }
+
+    private void CloseRepairRequestForm()
+    {
+        isRepairRequestCreateOpen = false;
+        requestMessage = null;
+    }
+
+    private async Task OpenRequestEditFormAsync()
+    {
+        requestMessage = null;
+        editableRequestDocuments = (await OperationalSectionService.GetEditableRequestDocumentsAsync()).ToList();
+        isRequestEditOpen = true;
+    }
+
+    private void CloseRequestEditForm()
+    {
+        isRequestEditOpen = false;
+        requestMessage = null;
+    }
+
+    private async Task OnRepairRequestComponentChangedAsync(ChangeEventArgs args)
+    {
+        repairRequestModel.ComponentInstanceId = Convert.ToString(args.Value) ?? string.Empty;
+        repairRequestModel.SerialNumber = string.IsNullOrWhiteSpace(repairRequestModel.ComponentInstanceId)
+            ? string.Empty
+            : await OperationalSectionService.GetComponentInstanceSerialNumberAsync(repairRequestModel.ComponentInstanceId);
+    }
+
+    private async Task OnInternalMovementComponentChangedAsync(ChangeEventArgs args)
+    {
+        internalMovementRequestModel.ComponentInstanceId = Convert.ToString(args.Value) ?? string.Empty;
+        internalMovementRequestModel.SerialNumber = string.IsNullOrWhiteSpace(internalMovementRequestModel.ComponentInstanceId)
+            ? string.Empty
+            : await OperationalSectionService.GetComponentInstanceSerialNumberAsync(internalMovementRequestModel.ComponentInstanceId);
+    }
+
+    private async Task SaveInternalMovementRequestAsync()
+    {
+        if (CurrentUser is null)
+        {
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(internalMovementRequestModel.DocumentNumber)
+            || string.IsNullOrWhiteSpace(internalMovementRequestModel.ComponentInstanceId)
+            || string.IsNullOrWhiteSpace(internalMovementRequestModel.NewLocationId))
+        {
+            requestMessage = "Заполните номер документа, агрегат и новое местоположение.";
+            return;
+        }
+
+        await OperationalSectionService.CreateInternalMovementRequestAsync(internalMovementRequestModel, CurrentUser.Id);
+        isInternalMovementRequestCreateOpen = false;
+        requestMessage = null;
+
+        if (selectedOperationalAction is not null)
+        {
+            await ReloadOperationalActionAsync();
+        }
+    }
+
+    private async Task SaveRepairRequestAsync()
+    {
+        if (CurrentUser is null)
+        {
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(repairRequestModel.DocumentNumber)
+            || string.IsNullOrWhiteSpace(repairRequestModel.RequestReason)
+            || string.IsNullOrWhiteSpace(repairRequestModel.ComponentInstanceId))
+        {
+            requestMessage = "Заполните номер документа, причину заявки и агрегат.";
+            return;
+        }
+
+        await OperationalSectionService.CreateRepairRequestAsync(repairRequestModel, CurrentUser.Id);
+        isRepairRequestCreateOpen = false;
+        requestMessage = null;
+
+        if (selectedOperationalAction is not null)
+        {
+            await ReloadOperationalActionAsync();
+        }
+    }
+
+    private async Task SaveRequestDocumentsAsync()
+    {
+        if (CurrentUser is null)
+        {
+            return;
+        }
+
+        foreach (var request in editableRequestDocuments.Where(request =>
+            request.IsEditable
+            && (!string.Equals(request.DocumentNumber, string.Empty, StringComparison.Ordinal)
+                || !string.Equals(request.RequestStatus, request.OriginalRequestStatus, StringComparison.Ordinal))))
+        {
+            await OperationalSectionService.SaveRequestDocumentAsync(request, CurrentUser.Id);
+        }
+
+        editableRequestDocuments = (await OperationalSectionService.GetEditableRequestDocumentsAsync()).ToList();
+        requestMessage = "Изменения сохранены.";
+
+        if (selectedOperationalAction is not null)
+        {
+            await ReloadOperationalActionAsync();
+        }
+    }
+
+    private async Task SaveIncomingInvoiceAsync()
+    {
+        if (CurrentUser is null)
+        {
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(incomingInvoiceModel.DocumentNumber)
+            || string.IsNullOrWhiteSpace(incomingInvoiceModel.SupplierId)
+            || string.IsNullOrWhiteSpace(incomingInvoiceModel.ComponentId)
+            || string.IsNullOrWhiteSpace(incomingInvoiceModel.ComponentSerialNumber)
+            || string.IsNullOrWhiteSpace(incomingInvoiceModel.CurrentLocationId))
+        {
+            incomingInvoiceMessage = "Заполните номер документа, поставщика, агрегат, серийный номер и место на складе.";
+            return;
+        }
+
+        await OperationalSectionService.CreateIncomingInvoiceAsync(incomingInvoiceModel, CurrentUser.Id);
+        isIncomingInvoiceCreateOpen = false;
+        incomingInvoiceMessage = null;
+
+        if (selectedOperationalAction is not null)
+        {
+            await ReloadOperationalActionAsync();
+        }
+    }
+
+    private async Task SaveCreatedDocumentAsync()
+    {
+        if (CurrentUser is null)
+        {
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(createDocumentModel.DocumentTypeId) || string.IsNullOrWhiteSpace(createDocumentModel.DocumentNumber))
+        {
+            documentCreateMessage = "Заполните тип и номер документа.";
+            return;
+        }
+
+        await OperationalSectionService.CreateDocumentAsync(createDocumentModel, CurrentUser.Id);
+        isDocumentCreateOpen = false;
+        documentCreateMessage = null;
+
+        if (selectedOperationalAction is not null)
+        {
+            await ReloadOperationalActionAsync();
+        }
+    }
+
+    private void SetCreateDocumentQuantity(ChangeEventArgs args)
+    {
+        createDocumentModel.Quantity = int.TryParse(Convert.ToString(args.Value), out var quantity) && quantity > 0
+            ? quantity
+            : 1;
+    }
+
+    private void SetIncomingInvoiceQuantity(ChangeEventArgs args)
+    {
+        incomingInvoiceModel.Quantity = int.TryParse(Convert.ToString(args.Value), out var quantity) && quantity > 0
+            ? quantity
+            : 1;
+    }
+
+    private static int? ParseNullableInt(object? value)
+    {
+        return int.TryParse(Convert.ToString(value), out var parsed) ? parsed : null;
+    }
+
+    private void AddEditableReferenceRow()
+    {
+        if (editableReferenceTable is null)
+        {
+            return;
+        }
+
+        var row = new MUiKOA_WEB.Models.EditableReferenceRow { IsNew = true };
+
+        foreach (var column in editableReferenceTable.Columns)
+        {
+            row.Values[column.Name] = null;
+        }
+
+        editableReferenceTable.Rows.Insert(0, row);
+    }
+
+    private static string? GetEditableValue(MUiKOA_WEB.Models.EditableReferenceRow row, string column)
+    {
+        return row.Values.TryGetValue(column, out var value) ? value : null;
+    }
+
+    private static void SetEditableValue(MUiKOA_WEB.Models.EditableReferenceRow row, string column, string? value)
+    {
+        row.Values[column] = value;
+    }
+
+    private void BackToReferenceMenu()
+    {
+        selectedReference = null;
+        isReferenceLoading = false;
+        referenceGroups = [];
+        referenceRows = [];
+        locationData = null;
+    }
+
+    private void BackToAdminMenu()
+    {
+        selectedAdminAction = null;
+        selectedUserCard = null;
+        selectedAdminReferenceTable = null;
+        editableReferenceTable = null;
+        isAdminLoading = false;
+        isAdminReferenceEditing = false;
+        adminWarehouseData = null;
+    }
+
+    private void BackToOperationalMenu()
+    {
+        selectedOperationalAction = null;
+        operationalRows = [];
+        isOperationalLoading = false;
+        isDocumentCreateOpen = false;
+        isIncomingInvoiceCreateOpen = false;
+        isRequestTypePickerOpen = false;
+        isInternalMovementRequestCreateOpen = false;
+        isRepairRequestCreateOpen = false;
+        isRequestEditOpen = false;
+        selectedDocumentCard = null;
+        documentCreateMessage = null;
+        incomingInvoiceMessage = null;
+        requestMessage = null;
+        searchText = null;
+        selectedDocumentTypeId = null;
+        selectedCreatorId = null;
+        selectedMovementTypeId = null;
+        selectedComponentInstanceId = null;
+        selectedZoneId = null;
+        selectedCellId = null;
+        reportDateFrom = null;
+        reportDateTo = null;
+        selectedComponentTypeId = null;
+        selectedPurchaseComponentId = null;
+        purchasePlanQuantity = 1;
+        purchasePlanMessage = null;
+        generatedPurchasePlanDocument = null;
+        generatedStockValueDocument = null;
+        purchasePlanItems = [];
+        purchaseComponentOptions = [];
+        zoneOptions = [];
+        cellOptions = [];
+    }
+
+    private void GoHome()
+    {
+        selectedSection = WarehouseSection;
+        isProfileOpen = false;
+        isProfileEditing = false;
+        profileMessage = null;
+        BackToReferenceMenu();
+        BackToAdminMenu();
+        BackToOperationalMenu();
+    }
+
+    private void Logout()
+    {
+        UserSession.Clear();
+        Navigation.NavigateTo("/logout", forceLoad: true);
+    }
+
+    private static string FormatReferenceValue(object? value)
+    {
+        return value switch
+        {
+            null => string.Empty,
+            DateOnly dateOnly => dateOnly.ToString("dd.MM.yyyy"),
+            DateTime dateTime => dateTime.ToString("dd.MM.yyyy"),
+            bool boolean => boolean ? "Да" : "Нет",
+            _ => Convert.ToString(value) ?? string.Empty
+        };
+    }
+
+    private static string FormatMoney(decimal value)
+    {
+        return value.ToString("N2", System.Globalization.CultureInfo.GetCultureInfo("ru-RU"));
+    }
+
+    private static IReadOnlyList<string> GetVisibleColumns(IReadOnlyList<IReadOnlyDictionary<string, object?>> rows, params string[] hiddenColumns)
+    {
+        var hidden = hiddenColumns.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return rows.SelectMany(row => row.Keys)
+            .Where(column => !hidden.Contains(column))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private static bool HasDocumentCardColumn(IReadOnlyList<IReadOnlyDictionary<string, object?>> rows)
+    {
+        return rows.Any(row => row.ContainsKey("ID документа"));
+    }
+
+    private static bool IsStockTotalRow(IReadOnlyDictionary<string, object?> row)
+    {
+        return row.TryGetValue("Показатель", out var value)
+            && string.Equals(Convert.ToString(value), "Итого агрегатов на складе", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool TryGetLong(IReadOnlyDictionary<string, object?> row, string column, out long value)
+    {
+        value = 0;
+
+        return row.TryGetValue(column, out var rawValue)
+            && rawValue is not null
+            && long.TryParse(Convert.ToString(rawValue), out value);
+    }
+}

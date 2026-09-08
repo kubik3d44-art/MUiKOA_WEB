@@ -1,0 +1,74 @@
+@page "/"
+@layout AuthLayout
+
+<PageTitle>Модуль УиКОА</PageTitle>
+
+<main class="auth-page">
+    <section class="auth-panel" aria-labelledby="auth-title">
+        <div class="auth-brand">МУиКОА</div>
+
+        <div class="auth-card">
+            <h1 id="auth-title">Авторизация</h1>
+
+            @if (!string.IsNullOrWhiteSpace(ErrorMessage))
+            {
+                <div class="auth-error" role="alert">@ErrorMessage</div>
+            }
+
+            <form method="post" action="/login" class="auth-form">
+                <div class="auth-field">
+                    <label for="email">Email</label>
+                    <input id="email" name="email" class="form-control" type="email" autocomplete="username" required />
+                </div>
+
+                <div class="auth-field">
+                    <label for="password">Пароль</label>
+                    <input id="password" name="password" class="form-control" type="password" autocomplete="current-password" required />
+                </div>
+
+                <button type="submit" class="auth-submit">Войти</button>
+            </form>
+        </div>
+    </section>
+
+    <section class="modules-panel" aria-label="Разделы модуля">
+        @foreach (var item in moduleItems)
+        {
+            <article class="module-tile">
+                <h2>@item.Title</h2>
+                <div class="module-image">
+                    <img src="@item.ImagePath" alt="@item.Title" />
+                </div>
+            </article>
+        }
+    </section>
+
+    <footer class="auth-footer">
+        <a href="/privacy">2026 - МУиКОА - Политика конфиденциальности</a>
+    </footer>
+</main>
+
+@code {
+    [SupplyParameterFromQuery(Name = "error")]
+    public string? Error { get; set; }
+
+    private string? ErrorMessage => Error switch
+    {
+        "invalid" => "Не верная почта или пароль! Попробуйте ввести ещё раз",
+        "access-denied" => "Доступ запрещён !",
+        "database" => "Ошибка подключения к базе данных. Проверьте параметры подключения и повторите попытку.",
+        _ => null
+    };
+
+    private readonly ModulePreview[] moduleItems =
+    [
+        new("Отчёты и аналитика", "/img/Отчёты и аналитика.png"),
+        new("Схема склада", "/img/Схема склада.png"),
+        new("Справочники агрегатов", "/img/Справочники.png"),
+        new("Движение агрегатов", "/img/Движение агрегатов.png"),
+        new("Парк воздушных судов", "/img/Парк воздушных судов.png"),
+        new("Контроль сроков и состояния", "/img/Контроль сроков и состояния.png")
+    ];
+
+    private sealed record ModulePreview(string Title, string ImagePath);
+}
